@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from functools import partial, reduce
 from timm.models.layers import DropPath, trunc_normal_
-from extensions.chamfer_dist import ChamferInfo
+from extensions.chamfer_dist import ChamferDistanceL1
 from .build import MODELS, build_model_from_cfg
 from models.Transformer_utils import *
 from utils import misc
@@ -928,7 +928,7 @@ class AdaPoinTr(nn.Module):
         self.build_loss_func()
 
     def build_loss_func(self):
-        self.loss_func = ChamferInfo()
+        self.loss_func = ChamferDistanceL1()
 
     def get_loss(self, ret, gt, epoch=1):
         pred_coarse, denoised_coarse, denoised_fine, pred_fine = ret

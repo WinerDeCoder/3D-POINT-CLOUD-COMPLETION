@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from functools import partial, reduce
 from timm.models.layers import DropPath, trunc_normal_
-from extensions.chamfer_dist import ChamferInfo
+from extensions.chamfer_dist import ChamferDistanceL1
 from .build import MODELS, build_model_from_cfg
 from models.Transformer_utils import *
 from utils import misc
@@ -225,7 +225,7 @@ class CrossAttnBlockApi(nn.Module):
             mask = None
         else:
             query_len = q.size(1)
-            mask = torch.zeros(query_len, query_len).to(q.device)  # dây là bươc mask
+            mask = torch.zeros(query_len, query_len).to(q.device)
             mask[:-denoise_length, -denoise_length:] = 1.
 
         # Self attn
@@ -537,6 +537,15 @@ class DGCNN_Grouper(nn.Module):
                                    nn.GroupNorm(4, 128),
                                    nn.LeakyReLU(negative_slope=0.2)
                                    )
+        self.layer5 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=1, bias=False),
+                                   nn.GroupNorm(4, 128),
+                                   nn.LeakyReLU(negative_slope=0.2)
+                                   )
+
+        self.layer6 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=1, bias=False),
+                                   nn.GroupNorm(4, 128),
+                                   nn.LeakyReLU(negative_slope=0.2)
+                                   )
         self.num_features = 128
     @staticmethod
     def fps_downsample(coor, x, num_group):
@@ -617,10 +626,23 @@ class DGCNN_Grouper(nn.Module):
         f = f.max(dim=-1, keepdim=False)[0]
         coor = coor_q
 
+        f_more = self.get_graph_feature(coor, f, coor, f)
+        f_more = self.layer5(f_more)
+        f_more = f_more.max(dim=-1, keepdim=False)[0]
+        
+        coor_q_more, f_q_more = self.fps_downsample(coor, f_more, 16)
+        f = self.get_graph_feature(coor_q_more, f_q_more, coor, f)
+        f_more = self.layer6(f_more)
+        f_more = f_more.max(dim=-1, keepdim=False)[0]
+        coor_more = coor_q_more
+
         coor = coor.transpose(-1, -2).contiguous()
         f = f.transpose(-1, -2).contiguous()
+        
+        coor_more = coor_more.transpose(-1, -2).contiguous()
+        f_more = f_more.transpose(-1, -2).contiguous()
 
-        return coor, f
+        return coor, f, coor_more,f_more
 
 class Encoder(nn.Module):
     def __init__(self, encoder_channel):
@@ -773,20 +795,48 @@ class PCTransformer(nn.Module):
 
         print_log(f'Transformer with config {config}', logger='MODEL')
         # base encoder
+        #self.embed_coor = nn.Linear(6,3)
+        #self.embed_dis = nn.Linear(1,3)
         if self.encoder_type == 'graph':
             self.grouper = DGCNN_Grouper(k = 16)
         else:
             self.grouper = SimpleEncoder(k = 32, embed_dims=512)
         self.pos_embed = nn.Sequential(
-            nn.Linear(in_chans, 128),
+            nn.Linear(in_chans, 232),
             nn.GELU(),
-            nn.Linear(128, encoder_config.embed_dim)
+            nn.Linear(232,encoder_config.embed_dim ) #
         )  
+
+        self.pos_embed_more = nn.Sequential(
+            nn.Linear(in_chans, 232),
+            nn.GELU(),
+            nn.Linear(232,encoder_config.embed_dim ) #
+        ) 
+
+        self.embed_pe = nn.Sequential(
+            nn.Linear(272, 512),
+            nn.GELU(),
+            nn.Linear(512,256 ) #
+        )
+
+        self.embed_x = nn.Sequential(
+            nn.Linear(272, 512),
+            nn.GELU(),
+            nn.Linear(512,encoder_config.embed_dim ) #
+        )
+
         self.input_proj = nn.Sequential(
             nn.Linear(self.grouper.num_features, 512),
             nn.GELU(),
             nn.Linear(512, encoder_config.embed_dim)
         )
+
+        self.input_proj_more = nn.Sequential(
+            nn.Linear(self.grouper.num_features, 512),
+            nn.GELU(),
+            nn.Linear(512, encoder_config.embed_dim)
+        )
+
         # Coarse Level 1 : Encoder
         self.encoder = PointTransformerEncoderEntry(encoder_config)
 
@@ -837,45 +887,80 @@ class PCTransformer(nn.Module):
 
     def forward(self, xyz):
         bs = xyz.size(0)
-        coor, f = self.grouper(xyz, self.center_num) # b n c
-        pe =  self.pos_embed(coor)
-        x = self.input_proj(f)
+        center = torch.mean(xyz, dim=1)  # mean of each batch   shape: bs * 3
 
-        x = self.encoder(x + pe, coor) # b n c
+        coor, f,coor_more,f_more = self.grouper(xyz, self.center_num) # b n c  n = 2048, coor = bs * 256 * 3; f = bs * 256 * 128
+        # center_coor = torch.mean(coor,dim=1) # dim = bs * 3
+        # center_coor = center_coor.reshape(bs,1,3)
+        # dis_to_center = coor - center_coor # bs * 256 * 3
+        # dis_to_center = torch.sum(dis_to_center*dis_to_center,dim=2) # bs* 256 *1
+        # dis_to_center = dis_to_center.view(bs,-1,1)
+        # dis_to_center,sorted_dis_index = torch.sort(dis_to_center, dim =1) # bs * 256 * 1
+        # expanded_indices = sorted_dis_index[:, :].expand_as(coor)
+        # coor = torch.gather(coor, dim=1, index=expanded_indices)  # sort coor as dis_to_center
+        # expanded_indices_f = sorted_dis_index[:, :].expand_as(f)
+        # f = torch.gather(f, dim=1, index=expanded_indices_f)  # sort f as dis_to_center
         
+        # dis_to_center = torch.nn.functional.normalize(dis_to_center,dim=1)
+        # dis_to_center = self.embed_dis(dis_to_center)
+        # concat_coor_dis = torch.concat([coor,dis_to_center],dim = 2) # bs * 256 * 6
         
-        # mình thấy đây là khúc dùng ouput của encoder -> W_O -> Max -> Projection
-        global_feature = self.increase_dim(x) # B 1024 N    , W_o(V)
-        global_feature = torch.max(global_feature, dim=1)[0] # B 1024   ,   M(W_o(V))
+        # coor_new = self.embed_coor(concat_coor_dis)
+        # #center_dif = abs(center - center_coor)
+        # pe =  self.pos_embed(coor_new)   # positional embedding # b * n * c ---> b * n * 256
+        # x = self.input_proj(f) #b * n * 256
 
-        coarse = self.coarse_pred(global_feature).reshape(bs, -1, 3)  # coarse C_o = P(M(W_o(V)))
+        pe_more = self.pos_embed_more(coor_more)  # bs * 16 * 256
+        x_more = self.input_proj_more(f_more)   # bs * 16 * 256
+        
+        #center_dif = abs(center - center_coor)
+        pe =  self.pos_embed(coor)   # positional embedding # b * n * c ---> b * n * 256
+        x = self.input_proj(f) #b * n * 256
+        
+        x_all = torch.concat([x,x_more], dim=1) # bs * 256+16 * 256
+        pe_all = torch.concat([pe, pe_more],dim=1) # bs * 256+16 * 256
+        
+        x_all = x_all.permute(0,2,1)
+        pe_all = pe_all.permute(0,2,1)
+        
+        x_embed = self.embed_x(x_all) # bs * 256 * 256
+        pe_embed = self.embed_pe(pe_all) # bs * 256 * 256
+        
+        x_embed = x_embed.permute(0,2,1)
+        pe_embed = pe_embed.permute(0,2,1)
 
-        coarse_inp = misc.fps(xyz, self.num_query//2) # B 128 3  # hình như khúc này là point proxy ảo, nch chưa hieur lắm
-        coarse = torch.cat([coarse, coarse_inp], dim=1) # B 224+128 3? # bước concat , c_o với pre c_o?, hình như đã concat hết (V,F)
+        x = self.encoder(x_embed+pe_embed, coor) # b n c  ( x + pe = b * n * 256 ), coor = bs * n * 3
+        global_feature = self.increase_dim(x) # B 1024 N 
+        global_feature = torch.max(global_feature, dim=1)[0] # B 1024
 
-        mem = self.mem_link(x)  # MLP cuối ,  MLP([C_o,M(W_o(V))]), no ? kind of Linear(V)
+        coarse = self.coarse_pred(global_feature).reshape(bs, -1, 3)
+
+        coarse_inp = misc.fps(xyz, self.num_query//2) # B 128 3
+        coarse = torch.cat([coarse, coarse_inp], dim=1) # B 224+128 3?
+
+        mem = self.mem_link(x)
 
         # query selection
-        query_ranking = self.query_ranking(coarse) # b n 1  
+        query_ranking = self.query_ranking(coarse) # b n 1
         idx = torch.argsort(query_ranking, dim=1, descending=True) # b n 1
-        coarse = torch.gather(coarse, 1, idx[:,:self.num_query].expand(-1, -1, coarse.size(-1))) # ranking xong sort rồi lấy ra num_query lớn nhất
+        coarse = torch.gather(coarse, 1, idx[:,:self.num_query].expand(-1, -1, coarse.size(-1)))
 
         if self.training:
             # add denoise task
             # first pick some point : 64?
-            picked_points = misc.fps(xyz, 64) # hay khúc này mới là denoising, C _ ground truth
-            picked_points = misc.jitter_points(picked_points)  # add random noise to C ground truth
-            coarse = torch.cat([coarse, picked_points], dim=1) # B 256+64 3?  này là trước khi qua MLP
+            picked_points = misc.fps(xyz, 64)
+            picked_points = misc.jitter_points(picked_points)
+            coarse = torch.cat([coarse, picked_points], dim=1) # B 256+64 3?
             denoise_length = 64     
 
             # produce query
-            q = self.mlp_query(   # 2 thawngd C nó cần dc biến concat với M(W(V))
+            q = self.mlp_query(
             torch.cat([
                 global_feature.unsqueeze(1).expand(-1, coarse.size(1), -1),
-                coarse], dim = -1)) # b n c,  global = C_O, coarse = c_^
+                coarse], dim = -1)) # b n c
 
             # forward decoder
-            q = self.decoder(q=q, v=mem, q_pos=coarse, v_pos=coor, denoise_length=denoise_length)  # q = [Q,Q^], V = men
+            q = self.decoder(q=q, v=mem, q_pos=coarse, v_pos=coor, denoise_length=denoise_length)
 
             return q, coarse, denoise_length
 
@@ -889,7 +974,7 @@ class PCTransformer(nn.Module):
             # forward decoder
             q = self.decoder(q=q, v=mem, q_pos=coarse, v_pos=coor)
 
-            return q, coarse, 0
+            return q, coarse, 0 
 
 ######################################## PoinTr ########################################  
 
@@ -928,7 +1013,7 @@ class AdaPoinTr(nn.Module):
         self.build_loss_func()
 
     def build_loss_func(self):
-        self.loss_func = ChamferInfo()
+        self.loss_func = ChamferDistanceL1()
 
     def get_loss(self, ret, gt, epoch=1):
         pred_coarse, denoised_coarse, denoised_fine, pred_fine = ret
@@ -946,13 +1031,13 @@ class AdaPoinTr(nn.Module):
         # recon loss
         loss_coarse = self.loss_func(pred_coarse, gt)
         loss_fine = self.loss_func(pred_fine, gt)
-        loss_recon = loss_coarse + loss_fine
+        loss_recon = loss_coarse + loss_fine 
 
         return loss_denoised, loss_recon
 
     def forward(self, xyz):
         q, coarse_point_cloud, denoise_length = self.base_model(xyz) # B M C and B M 3
-    
+        
         B, M ,C = q.shape
 
         global_feature = self.increase_dim(q.transpose(1,2)).transpose(1,2) # B M 1024

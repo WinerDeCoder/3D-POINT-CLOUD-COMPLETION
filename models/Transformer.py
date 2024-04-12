@@ -92,7 +92,7 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=2, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -121,7 +121,7 @@ class Attention(nn.Module):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, dim, out_dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, out_dim, num_heads=2, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         self.dim = dim
@@ -265,8 +265,8 @@ class Block(nn.Module):
 class PCTransformer(nn.Module):
     """ Vision Transformer with support for point cloud completion
     """
-    def __init__(self, in_chans=3, embed_dim=768, depth=[6, 6], num_heads=6, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                        num_query = 224, knn_layer = -1):
+    def __init__(self, in_chans=3, embed_dim=389, depth=[6, 6], num_heads=2, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
+                        num_query = 112, knn_layer = -1):
         super().__init__()
 
         self.num_features = self.embed_dim = embed_dim
